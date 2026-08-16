@@ -36,7 +36,7 @@ class ClaimIntake(BaseModel):
 
 
 
-class RetrieveDocument(BaseModel):
+class RetrievedDocument(BaseModel):
     id : str
     text : str
     source : str
@@ -69,7 +69,7 @@ class AssistantResponse(BaseModel):
     decision: ClaimDecision
     message: str
     missing_fields: list[str] = Field(default_factory=list)
-    citations: list[RetrieveDocument] = Field(default_factory=list)
+    citations: list[RetrievedDocument] = Field(default_factory=list)
     risk_signals: list[RiskSignal] = Field(default_factory=list)
     audit_events: list[str] = Field(default_factory=list)
 
@@ -80,7 +80,7 @@ class ClaimAssistantState(TypedDict):
     customer_message : str
     claim: NotRequired[ClaimIntake]
     missing_fields: NotRequired[list[str]]
-    retrieved_documents: NotRequired[list[RetrieveDocument]]
+    retrieved_documents: NotRequired[list[RetrievedDocument]]
     coverage_assessment: NotRequired[CoverageAssessment]
     risk_signals: NotRequired[list[RiskSignal]]
     response_message: NotRequired[str]

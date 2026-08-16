@@ -7,14 +7,14 @@ from langchain_openai import OpenAIEmbeddings
 from pinecone import Pinecone, ServerlessSpec
 
 from .config import Settings
-from .schemas import RetrieveDocument
+from .schemas import RetrievedDocument
 
 # ============================================================
 # Data model
 # ============================================================
 
 @dataclass(frozen=True)
-class DocumentsChunk:
+class DocumentChunk:
     """
     Represents a single chunk of a source document.
 
@@ -180,7 +180,7 @@ class PineconeKnowledgeBase:
     # Document ingestion
     # --------------------------------------------------------
 
-    def upsert_chunk(self, chunks:Iterable[DocumentsChunk], batch_size: int = 100) -> int:
+    def upsert_chunk(self, chunks:Iterable[DocumentChunk], batch_size: int = 100) -> int:
         """
         Convert document chunks into embeddings and store them in Pinecone.
 
@@ -238,6 +238,227 @@ class PineconeKnowledgeBase:
         # Retrieval
         # --------------------------------------------------------
 
+        def retrieve(self, query: str, top_k: int | None = None) -> list[RetrievedDocument]:
+            """
+            Retrieve document chunks that are semantically similar to the user's query.
+
+            Args:
+                query:
+                    User question or search text.
+
+                top_k:
+                    Number of results to retrieve. If omitted,
+                    the configured default is used.
+
+            Returns:
+                Retrieved documents ordered by Pinecone similarity.
+            """
+
+            # Convert the user's question into the same vector space used for the stored document embeddings.
+            query_vector = self.embeddings.embed_query(query)
+
+            retrieval_limit = (
+                top_k
+                if top_k is not None
+                else self.settings.pinecone_top_k
+            )
+
+            result = self._get_index_client().query(
+                vector=query_vector,
+                top_k=retrieval_limit,
+                namspace=self.settings.pinecone_namespace,
+                include_metadata=True,
+            )
+
+            matches = _get_value(result, "matches", [])
+
+            return [
+                self._match_to_document(match)
+                for match in matches
+            ]
+
+        def _match_to_document(self, match: Any,) -> RetrievedDocument:
+            """
+            Convert a raw Pinecone search result into the application's
+            RetrievedDocument schema.
+            """
+
+            metadata = _get_value(
+                match,
+                "metadata",
+                {},
+            ) or {}
+
+            return RetrievedDocument(
+                id=str(
+                    _get_value(
+                        match,
+                        "id",
+                        metadata.get("id", ""),
+                    )
+                ),
+                text=str(
+                    metadata.get("text", "")
+                ),
+                source=str(
+                    metadata.get("source", "unknown")
+                ),
+                title=str(
+                    metadata.get("title", "Untitled")
+                ),
+                score=_get_value(
+                    match,
+                    "score",
+                    None,
+                ),
+                metadata=dict(metadata),
+            )
+
+
+# ============================================================
+# Document loading and chunk creation
+# ============================================================
+
+def load_markdown_chunks(source_dir: Path, max_chars: int = 1800) -> list[DocumentChunk]:
+    """
+    Load Markdown files recursively and split them into chunks.
+
+    Each chunk receives a deterministic UUID based on:
+    - file path
+    - chunk position
+    - beginning of the chunk text
+
+    Using UUID5 makes re-ingestion stable: the same chunk will
+    normally receive the same ID.
+    """
+
+    chunks: list[DocumentChunk] = []
+
+    markdown_files = sorted(
+        source_dir.rglob("*.md")
+    )
+
+    for path in markdown_files:
+        # Example:
+        #
+        # insurance-claims.md
+        #        ↓
+        # Insurance Claims
+        title = (
+            path.stem
+            .replace("-", " ")
+            .title()
+        )
+
+        document_text = path.read_text(encoding="utf-8")
+
+        text_chunks = _chunk_text(document_text, max_chars=max_chars)
+
+        for position, chunk_text in enumerate(text_chunks, start=1):
+            chunk_id = _create_chunk_id(path =path, position=position, text=chunk_text)
+
+            chunks.append( DocumentChunk(
+                    id=chunk_id,
+                    text=chunk_text,
+                    source=str(path),
+                    title=title,
+                    )
+            )
+
+        return chunks
+
+
+def _create_chunk_id(path: Path, position:int, text:str) -> str:
+    """
+    Generate a deterministic ID for a document chunk.
+
+    UUID5 always produces the same UUID when given the same input.
+    """
+    unique_value = (
+        f"{path.as_posix()}:"
+        f"{position}:"
+        f"{text[:64]}"
+    )
+
+    return str(uuid5(NAMESPACE_URL, unique_value))
+
+
+# ============================================================
+# Text chunking
+# ============================================================
+
+def _chunk_text(text: str, max_chars: int) -> list[str]:
+    """
+    Split text into paragraph-based chunks.
+
+    Paragraphs are kept together whenever possible until adding
+    another paragraph would exceed max_chars.
+    """
+
+    paragraphs = [
+        paragraph.strip()
+        for paragraph in text.split("\n\n")
+        if paragraph.strip()
+    ]
+
+    chunks: list[str] = []
+
+    current_chunk = ""
+
+    for paragraph in paragraphs:
+        separator_size = 2 if current_chunk else 0
+
+        combined_length = (len(current_chunk) + separator_size + len(paragraph))
+
+        # Keep adding paragraphs while the chunk remains within the configured size
+        if combined_length <= max_chars:
+            current_chunk = (
+                f"{current_chunk}\n\n{paragraph}".strip()
+            )
+            continue
+
+        # The current chunk is full. So store it.
+        if current_chunk:
+            chunks.append(current_chunk)
+
+        # Start building the next chunk
+        current_chunk = paragraph
+
+    # Add the final partially built chunk
+    if current_chunk:
+        chunks.append(current_chunk)
+
+    return chunks
+
+
+# ============================================================
+# LLM context formatting
+# ============================================================
+
+def format_context(documents: list[RetrievedDocument]) -> str:
+    """
+    Convert retrieved documents into a readable context string
+    that can be inserted into an LLM prompt.
+    """
+    if not documents:
+        return "No relevant documents found."
+
+    formatted_documents = [
+        (
+            f"[{doc.id}] {doc.title} ({doc.source})\n"
+            f"{doc.text}"
+        )
+        for doc in documents
+    ]
+
+    return "\n\n".join(
+        formatted_documents
+    )
+
+
+
+
+
 
 
 # ============================================================
@@ -257,3 +478,12 @@ def _get_value(value: Any, key: str, default: Any = None) -> Any:
         return value.get(key, default,)
 
     return getattr(value,key,default,)
+
+
+def _get_upserted_count(response: Any) -> int:
+    """
+    Extract the number of successfully upserted vectors from a
+    Pinecone response.
+    """
+
+    return int(_get_value(response, "upserted_count", 0))
